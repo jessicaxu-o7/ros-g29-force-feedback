@@ -1,6 +1,6 @@
 g29_force_feedback:
   ros__parameters:
-    device_name: "/dev/input/event13"
+    device_name: "/dev/input/by-id/usb-Logitech_G29_Driving_Force_Racing_Wheel-event-joystick" #/dev/input/event17
     loop_rate: 0.1
     max_torque: 1.0
     min_torque: 0.2

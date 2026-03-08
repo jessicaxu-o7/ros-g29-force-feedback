@@ -1,4 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
+#include "std_msgs/msg/string.hpp"
 
 #include <linux/input.h>
 #include <sys/ioctl.h>
@@ -7,18 +8,29 @@
 #include <math.h>
 
 #include "ros_g29_force_feedback/msg/force_feedback.hpp"
-// #include "ros_g29_force_feedback/msg/force_feedback.hpp"
 
 class G29ForceFeedback : public rclcpp::Node {
 
 private:
     rclcpp::Subscription<ros_g29_force_feedback::msg::ForceFeedback>::SharedPtr sub_target;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher_;
     rclcpp::TimerBase::SharedPtr timer;
+    
     // device info
     int m_device_handle;
-    int m_axis_code = ABS_X;
-    int m_axis_min;
-    int m_axis_max;
+    int m_wheel_axis_code = ABS_X;
+    int m_accel_axis_code = ABS_Y;
+    int m_brake_axis_code = ABS_Z;
+    int m_clutch_axis_code = ABS_RZ;
+    // axis ranges
+    int m_wheel_min;
+    int m_wheel_max;
+    int m_accel_min;
+    int m_accel_max;
+    int m_brake_min;
+    int m_brake_max;
+    int m_clutch_min;
+    int m_clutch_max;
 
     // rosparam
     std::string m_device_name;
@@ -89,6 +101,9 @@ G29ForceFeedback::G29ForceFeedback()
     initDevice();
 
     rclcpp::sleep_for(std::chrono::seconds(1));
+
+    publisher_ = this->create_publisher<std_msgs::msg::String>("g29_input", 10);
+
     timer = this->create_wall_timer(std::chrono::milliseconds((int)(m_loop_rate*1000)), 
             std::bind(&G29ForceFeedback::loop,this));
 }
@@ -110,11 +125,34 @@ G29ForceFeedback::~G29ForceFeedback() {
 void G29ForceFeedback::loop() {
 
     struct input_event event;
-    double last_position = m_position;
+    // double last_position = m_position;
+    auto message = std_msgs::msg::String();
+
     // get current state
     while (read(m_device_handle, &event, sizeof(event)) == sizeof(event)) {
-        if (event.type == EV_ABS && event.code == m_axis_code) {
-            m_position = (event.value - (m_axis_max + m_axis_min) * 0.5) * 2 / (m_axis_max - m_axis_min);
+        if (event.type == EV_ABS && event.code == m_wheel_axis_code) {
+            m_position = (event.value - (m_wheel_max + m_wheel_min) * 0.5) * 2 / (m_wheel_max - m_wheel_min);
+            // print current state
+            message.data = "W" + std::to_string(m_position);
+            RCLCPP_INFO(this->get_logger(), "wheel pos=%f", m_position);
+        }
+        if (event.type == EV_ABS && event.code == m_accel_axis_code) {
+            // normalize value to 0.0 (not pressed) to 1.0 (fully pressed)
+            double accel_pos = (double)(event.value - m_accel_min) / (m_accel_max - m_accel_min);
+            message.data = "A" + std::to_string(accel_pos);
+            RCLCPP_INFO(this->get_logger(), "accel pos=%f", accel_pos);
+        }
+        if (event.type == EV_ABS && event.code == m_brake_axis_code) {
+            // normalize value to 0.0 (not pressed) to 1.0 (fully pressed)
+            double brake_pos = (double)(event.value - m_brake_min) / (m_brake_max - m_brake_min);
+            message.data = "B" + std::to_string(brake_pos);
+            RCLCPP_INFO(this->get_logger(), "brake pos=%f", brake_pos);
+        }
+        if (event.type == EV_ABS && event.code == m_clutch_axis_code) {
+            // normalize value to 0.0 (not pressed) to 1.0 (fully pressed)
+            double clutch_pos = (double)(event.value - m_clutch_min) / (m_clutch_max - m_clutch_min);
+            message.data = "C" + std::to_string(clutch_pos);
+            RCLCPP_INFO(this->get_logger(), "clutch pos=%f", clutch_pos);
         }
     }
 
@@ -128,6 +166,9 @@ void G29ForceFeedback::loop() {
     }
 
     uploadForce(m_target.position, m_torque, m_attack_length);
+
+    // maybe should be in the while loop?
+    publisher_->publish(message);
 }
 
 
@@ -179,6 +220,7 @@ void G29ForceFeedback::uploadForce(const double &position,
                                    const double &torque,
                                    const double &attack_length) {
 
+    (void)position; // unused parameter kept for API compatibility
     // std::cout << torque << std::endl;
     // set effect
     m_effect.u.constant.level = 0x7fff * std::min(torque, m_max_torque);
@@ -213,7 +255,7 @@ void G29ForceFeedback::targetCallback(const ros_g29_force_feedback::msg::ForceFe
 // initialize force feedback device
 void G29ForceFeedback::initDevice() {
     // setup device
-    unsigned char key_bits[1+KEY_MAX/8/sizeof(unsigned char)];
+    // unsigned char key_bits[1+KEY_MAX/8/sizeof(unsigned char)];
     unsigned char abs_bits[1+ABS_MAX/8/sizeof(unsigned char)];
     unsigned char ff_bits[1+FF_MAX/8/sizeof(unsigned char)];
     struct input_event event;
@@ -240,15 +282,51 @@ void G29ForceFeedback::initDevice() {
         exit(1);
     }
 
-    // get axis value range
-    if (ioctl(m_device_handle, EVIOCGABS(m_axis_code), &abs_info) < 0) {
-        std::cout << "ERROR: cannot get axis range" << std::endl;
+    // get wheel axis range
+    if (ioctl(m_device_handle, EVIOCGABS(m_wheel_axis_code), &abs_info) < 0) {
+        std::cout << "ERROR: cannot get wheel axis range" << std::endl;
         exit(1);
     }
-    m_axis_max = abs_info.maximum;
-    m_axis_min = abs_info.minimum;
-    if (m_axis_min >= m_axis_max) {
-        std::cout << "ERROR: axis range has bad value" << std::endl;
+    m_wheel_max = abs_info.maximum;
+    m_wheel_min = abs_info.minimum;
+    if (m_wheel_min >= m_wheel_max) {
+        std::cout << "ERROR: wheel axis range has bad value" << std::endl;
+        exit(1);
+    }
+
+    // get accel axis range
+    if (ioctl(m_device_handle, EVIOCGABS(m_accel_axis_code), &abs_info) < 0) {
+        std::cout << "ERROR: cannot get accel axis range" << std::endl;
+        exit(1);
+    }
+    m_accel_max = abs_info.maximum;
+    m_accel_min = abs_info.minimum;
+    if (m_accel_min >= m_accel_max) {
+        std::cout << "ERROR: accel axis range has bad value" << std::endl;
+        exit(1);
+    }
+
+    // get brake axis range
+    if (ioctl(m_device_handle, EVIOCGABS(m_brake_axis_code), &abs_info) < 0) {
+        std::cout << "ERROR: cannot get brake axis range" << std::endl;
+        exit(1);
+    }
+    m_brake_max = abs_info.maximum;
+    m_brake_min = abs_info.minimum;
+    if (m_brake_min >= m_brake_max) {
+        std::cout << "ERROR: brake axis range has bad value" << std::endl;
+        exit(1);
+    }
+
+    // get clutch axis range
+    if (ioctl(m_device_handle, EVIOCGABS(m_clutch_axis_code), &abs_info) < 0) {
+        std::cout << "ERROR: cannot get clutch axis range" << std::endl;
+        exit(1);
+    }
+    m_clutch_max = abs_info.maximum;
+    m_clutch_min = abs_info.minimum;
+    if (m_clutch_min >= m_clutch_max) {
+        std::cout << "ERROR: clutch axis range has bad value" << std::endl;
         exit(1);
     }
 
